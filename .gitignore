@@ -1,0 +1,14 @@
+# 编译产物
+dist/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# macOS
+.DS_Store
+
+# 调试文件
+__debug_bin*

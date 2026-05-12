@@ -1,0 +1,65 @@
+syntax = "proto3";
+
+package svga;
+
+option go_package = "github.com/jhyan/svg2gif/proto/svga";
+
+// Movie represents an SVGA animation file
+message Movie {
+  // Version info
+  string version = 1;
+
+  // Movie parameters
+  int32 fps = 2;
+  int32 frames = 3;
+  int32 width = 4;
+  int32 height = 5;
+
+  // Image resources (key: imageId, value: image data)
+  map<string, bytes> images = 6;
+
+  // Audio resources (optional)
+  map<string, bytes> audios = 7;
+
+  // Dynamic elements
+  repeated Sprite sprites = 8;
+
+  // Shape elements
+  repeated Shape shapes = 9;
+}
+
+// Sprite represents an image sprite element
+message Sprite {
+  string imageKey = 1;
+  repeated Frame frames = 2;
+}
+
+// Shape represents a vector shape element
+message Shape {
+  string shapeKey = 1;
+  repeated Frame frames = 2;
+  bytes shapeData = 3;
+}
+
+// Frame contains transformation data for a single frame
+message Frame {
+  int32 frameIndex = 1;
+
+  // Transform properties
+  float alpha = 2;
+  float scaleX = 3;
+  float scaleY = 4;
+  float rotation = 5;
+  float x = 6;
+  float y = 7;
+
+  // Optional mask
+  string maskKey = 8;
+}
+
+// Layout contains element layout information
+message Layout {
+  string type = 1;
+  string name = 2;
+  repeated Frame frames = 3;
+}
