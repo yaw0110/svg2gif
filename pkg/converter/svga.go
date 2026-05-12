@@ -91,6 +91,7 @@ func (c *SVGAConverter) Convert(r io.Reader, opts Options) ([]image.Image, []int
 
 	// Decode images
 	images := make(map[string]image.Image)
+	imageSizes := make(map[string][2]int) // Store image dimensions for position mode detection
 	for key, imgData := range movie.Images {
 		img, err := c.decodeImage(imgData)
 		if err != nil {
@@ -98,6 +99,15 @@ func (c *SVGAConverter) Convert(r io.Reader, opts Options) ([]image.Image, []int
 			continue
 		}
 		images[key] = img
+		bounds := img.Bounds()
+		imageSizes[key] = [2]int{bounds.Dx(), bounds.Dy()}
+	}
+
+	// Detect position mode if auto
+	if opts.PositionMode == PositionModeAuto || opts.PositionMode == "" {
+		movie.PositionMode = c.detectPositionMode(movie, imageSizes)
+	} else {
+		movie.PositionMode = opts.PositionMode
 	}
 
 	// If no sprites but has images, use images directly as frames
@@ -147,6 +157,60 @@ func (c *SVGAConverter) Convert(r io.Reader, opts Options) ([]image.Image, []int
 	}
 
 	return frames, delays, nil
+}
+
+// detectPositionMode analyzes SVGA data to determine how positions should be interpreted
+func (c *SVGAConverter) detectPositionMode(movie *Movie, imageSizes map[string][2]int) PositionMode {
+	canvasW, canvasH := float64(movie.Width), float64(movie.Height)
+
+	// Find most common image size
+	imageSizeCount := make(map[[2]int]int)
+	for _, size := range imageSizes {
+		imageSizeCount[size]++
+	}
+
+	var commonW, commonH int
+	maxCount := 0
+	for size, count := range imageSizeCount {
+		if count > maxCount {
+			maxCount = count
+			commonW = size[0]
+			commonH = size[1]
+		}
+	}
+
+	// Collect all non-zero positions
+	positions := make(map[[2]float32]int)
+	for _, sprite := range movie.Sprites {
+		for _, f := range sprite.Frames {
+			if f.X != 0 || f.Y != 0 {
+				positions[[2]float32{f.X, f.Y}]++
+			}
+		}
+	}
+
+	// Check position patterns
+	for pos := range positions {
+		px, py := float64(pos[0]), float64(pos[1])
+
+		// Mode 1: position equals canvas size (center)
+		if px == canvasW && py == canvasH {
+			return PositionModeCanvasSize
+		}
+
+		// Mode 2: position equals image size (center)
+		if px == float64(commonW) && py == float64(commonH) {
+			return PositionModeImageSize
+		}
+
+		// Mode 3: position is absolute center
+		if px == canvasW/2 && py == canvasH/2 {
+			return PositionModeCenter
+		}
+	}
+
+	// Default: position is sprite center
+	return PositionModeAbsolute
 }
 
 // ProtobufReader helps read protobuf wire format
@@ -476,7 +540,7 @@ func (c *SVGAConverter) renderFrame(movie *Movie, images map[string]image.Image,
 		// Position at origin (0,0) means hidden/off-screen
 		// Position equal to canvas dimensions means centered
 		if frame != nil && (frame.X != 0 || frame.Y != 0) {
-			c.drawSpriteAtPosition(img, spriteImg, frame, width, height, scaleX, scaleY, int(movie.Width), int(movie.Height))
+			c.drawSpriteAtPosition(img, spriteImg, frame, width, height, scaleX, scaleY, int(movie.Width), int(movie.Height), movie.PositionMode)
 		}
 		// Sprites with position (0,0) are hidden - don't draw them
 	}
@@ -485,9 +549,7 @@ func (c *SVGAConverter) renderFrame(movie *Movie, images map[string]image.Image,
 }
 
 // drawSpriteAtPosition draws sprite at the position specified in frame data
-// In SVGA, position (X, Y) represents the CENTER of the image relative to canvas origin (0,0)
-// When position equals canvas dimensions, it means center the sprite on the canvas
-func (c *SVGAConverter) drawSpriteAtPosition(dst *image.RGBA, src image.Image, frame *Frame, width, height int, scaleX, scaleY float64, origWidth, origHeight int) {
+func (c *SVGAConverter) drawSpriteAtPosition(dst *image.RGBA, src image.Image, frame *Frame, width, height int, scaleX, scaleY float64, origWidth, origHeight int, mode PositionMode) {
 	srcBounds := src.Bounds()
 	srcW, srcH := srcBounds.Dx(), srcBounds.Dy()
 
@@ -495,17 +557,29 @@ func (c *SVGAConverter) drawSpriteAtPosition(dst *image.RGBA, src image.Image, f
 	scaledW := int(float64(srcW) * scaleX)
 	scaledH := int(float64(srcH) * scaleY)
 
-	// Position interpretation:
-	// If position equals original canvas dimensions, it means "center the sprite"
-	// Otherwise, position is absolute center coordinates
+	// Skip hidden sprites
+	if frame.X == 0 && frame.Y == 0 {
+		return
+	}
+
+	// Calculate position based on mode
 	var centerX, centerY float64
 
-	if int(frame.X) == origWidth && int(frame.Y) == origHeight {
-		// Position equals canvas size - center the sprite
+	switch mode {
+	case PositionModeCanvasSize:
+		// Position equals canvas size means centered
 		centerX = float64(width) / 2
 		centerY = float64(height) / 2
-	} else {
-		// Scale the position coordinates
+	case PositionModeImageSize:
+		// Position equals image size means centered
+		centerX = float64(width) / 2
+		centerY = float64(height) / 2
+	case PositionModeCenter:
+		// Position is already the center
+		centerX = float64(frame.X) * scaleX
+		centerY = float64(frame.Y) * scaleY
+	default:
+		// PositionModeAbsolute: position is sprite center
 		centerX = float64(frame.X) * scaleX
 		centerY = float64(frame.Y) * scaleY
 	}
@@ -624,13 +698,14 @@ func (c *SVGAConverter) drawImageCentered(dst *image.RGBA, src image.Image, widt
 
 // Movie represents SVGA movie data
 type Movie struct {
-	Version string
-	Fps     int32
-	Frames  int32
-	Width   int32
-	Height  int32
-	Images  map[string][]byte
-	Sprites []*Sprite
+	Version      string
+	Fps          int32
+	Frames       int32
+	Width        int32
+	Height       int32
+	Images       map[string][]byte
+	Sprites      []*Sprite
+	PositionMode PositionMode // Detected or configured position mode
 }
 
 // Sprite represents a sprite element

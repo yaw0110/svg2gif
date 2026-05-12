@@ -30,8 +30,9 @@ func main() {
 	}
 
 	// 解析参数
-	var inputDir, outputDir string
+	var source, target string
 	width, height, fps := 0, 0, 20
+	var positionMode converter.PositionMode
 
 	i := 0
 	for i < len(args) {
@@ -60,41 +61,49 @@ func main() {
 				fmt.Fprintln(os.Stderr, "Error: --fps requires a value")
 				os.Exit(1)
 			}
+		case "--position-mode", "-p":
+			if i+1 < len(args) {
+				positionMode = converter.PositionMode(args[i+1])
+				i += 2
+			} else {
+				fmt.Fprintln(os.Stderr, "Error: --position-mode requires a value")
+				os.Exit(1)
+			}
 		default:
-			if inputDir == "" {
-				inputDir = args[i]
-			} else if outputDir == "" {
-				outputDir = args[i]
+			if source == "" {
+				source = args[i]
+			} else if target == "" {
+				target = args[i]
 			}
 			i++
 		}
 	}
 
-	if inputDir == "" || outputDir == "" {
-		fmt.Fprintln(os.Stderr, "Error: input and output directories are required")
+	if source == "" || target == "" {
+		fmt.Fprintln(os.Stderr, "Error: source and target are required")
 		printUsage()
 		os.Exit(1)
 	}
 
-	// 检查输入目录
-	info, err := os.Stat(inputDir)
+	// 检查 source
+	info, err := os.Stat(source)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: input directory not found: %s\n", inputDir)
+		fmt.Fprintf(os.Stderr, "Error: source not found: %s\n", source)
 		os.Exit(1)
 	}
 	if !info.IsDir() {
-		fmt.Fprintf(os.Stderr, "Error: %s is not a directory\n", inputDir)
+		fmt.Fprintf(os.Stderr, "Error: %s is not a directory\n", source)
 		os.Exit(1)
 	}
 
-	// 创建输出目录
-	if err := os.MkdirAll(outputDir, 0755); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: failed to create output directory: %v\n", err)
+	// 创建 target 目录
+	if err := os.MkdirAll(target, 0755); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: failed to create target directory: %v\n", err)
 		os.Exit(1)
 	}
 
-	// 扫描输入目录
-	files, err := filepath.Glob(filepath.Join(inputDir, "*"))
+	// 扫描 source 目录
+	files, err := filepath.Glob(filepath.Join(source, "*"))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: failed to scan input directory: %v\n", err)
 		os.Exit(1)
@@ -115,8 +124,8 @@ func main() {
 	}
 
 	fmt.Printf("Found %d file(s) to convert\n", len(validFiles))
-	fmt.Printf("Input:  %s\n", inputDir)
-	fmt.Printf("Output: %s\n", outputDir)
+	fmt.Printf("Source: %s\n", source)
+	fmt.Printf("Target: %s\n", target)
 	fmt.Println()
 
 	// 批量转换
@@ -127,11 +136,11 @@ func main() {
 		filename := filepath.Base(inputFile)
 		ext := filepath.Ext(filename)
 		baseName := strings.TrimSuffix(filename, ext)
-		outputFile := filepath.Join(outputDir, baseName+".gif")
+		outputFile := filepath.Join(target, baseName+".gif")
 
 		fmt.Printf("[%d/%d] Converting: %s\n", i+1, len(validFiles), filename)
 
-		err := convertFile(inputFile, outputFile, width, height, fps)
+		err := convertFile(inputFile, outputFile, width, height, fps, positionMode)
 		if err != nil {
 			fmt.Printf("  Failed: %v\n", err)
 			failed++
@@ -149,7 +158,7 @@ func main() {
 	fmt.Printf("Time:    %.2f seconds\n", elapsed.Seconds())
 }
 
-func convertFile(inputPath, outputPath string, width, height, fps int) error {
+func convertFile(inputPath, outputPath string, width, height, fps int, positionMode converter.PositionMode) error {
 	inputFile, err := os.Open(inputPath)
 	if err != nil {
 		return fmt.Errorf("failed to open file: %w", err)
@@ -167,9 +176,10 @@ func convertFile(inputPath, outputPath string, width, height, fps int) error {
 	}
 
 	opts := converter.Options{
-		Width:  width,
-		Height: height,
-		FPS:    fps,
+		Width:       width,
+		Height:      height,
+		FPS:         fps,
+		PositionMode: positionMode,
 	}
 
 	frames, delays, err := conv.Convert(inputFile, opts)
@@ -215,19 +225,22 @@ func convertFile(inputPath, outputPath string, width, height, fps int) error {
 func printUsage() {
 	fmt.Fprintf(os.Stderr, `svg2gif - Batch convert SVG/SVGA to GIF
 
-Usage: svg2gif [options] <input_dir> <output_dir>
+Usage: svg2gif [options] <source> <target>
 
 Options:
-  -w, --width <pixels>   Output width (default: auto)
-  -h, --height <pixels>  Output height (default: auto)
-  -f, --fps <number>     Frames per second (default: 20)
-  --help                 Show this help
-  --version              Show version
+  -w, --width <pixels>      Output width (default: auto)
+  -h, --height <pixels>     Output height (default: auto)
+  -f, --fps <number>        Frames per second (default: 20)
+  -p, --position-mode <mode> Position interpretation mode (default: auto)
+                            Modes: auto, canvas_size, image_size, center, absolute
+  --help                    Show this help
+  --version                 Show version
 
 Examples:
   svg2gif ./svga ./output
   svg2gif -w 800 -h 800 ./svga ./output
   svg2gif --fps 24 ./svga ./output
+  svg2gif -p image_size ./svga ./output
 
 `)
 }

@@ -1,6 +1,10 @@
 # 编译产物
 dist/
 
+# 用户数据目录
+source/
+target/
+
 # IDE
 .idea/
 .vscode/
