@@ -3,16 +3,17 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/jhyan/svg2gif/pkg/converter"
-	gifencoder "github.com/jhyan/svg2gif/pkg/gif"
+	apngencoder "github.com/jhyan/svg2gif/pkg/apng"
 )
 
 var (
-	version = "1.2.0"
+	version = "1.4.0"
 )
 
 func main() {
@@ -32,7 +33,6 @@ func main() {
 	// 解析参数
 	var source, target string
 	width, height, fps := 0, 0, 20
-	var positionMode converter.PositionMode
 
 	i := 0
 	for i < len(args) {
@@ -61,14 +61,6 @@ func main() {
 				fmt.Fprintln(os.Stderr, "Error: --fps requires a value")
 				os.Exit(1)
 			}
-		case "--position-mode", "-p":
-			if i+1 < len(args) {
-				positionMode = converter.PositionMode(args[i+1])
-				i += 2
-			} else {
-				fmt.Fprintln(os.Stderr, "Error: --position-mode requires a value")
-				os.Exit(1)
-			}
 		default:
 			if source == "" {
 				source = args[i]
@@ -82,6 +74,12 @@ func main() {
 	if source == "" || target == "" {
 		fmt.Fprintln(os.Stderr, "Error: source and target are required")
 		printUsage()
+		os.Exit(1)
+	}
+
+	// 检查 ffmpeg
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		fmt.Fprintln(os.Stderr, "Error: ffmpeg is required. Please install ffmpeg first.")
 		os.Exit(1)
 	}
 
@@ -99,6 +97,20 @@ func main() {
 	// 创建 target 目录
 	if err := os.MkdirAll(target, 0755); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: failed to create target directory: %v\n", err)
+		os.Exit(1)
+	}
+
+	// 创建 APNG 输出目录
+	apngTarget := filepath.Join(target, "apng")
+	if err := os.MkdirAll(apngTarget, 0755); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: failed to create APNG directory: %v\n", err)
+		os.Exit(1)
+	}
+
+	// 创建 GIF 输出目录
+	gifTarget := filepath.Join(target, "gif")
+	if err := os.MkdirAll(gifTarget, 0755); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: failed to create GIF directory: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -125,7 +137,8 @@ func main() {
 
 	fmt.Printf("Found %d file(s) to convert\n", len(validFiles))
 	fmt.Printf("Source: %s\n", source)
-	fmt.Printf("Target: %s\n", target)
+	fmt.Printf("APNG:   %s\n", apngTarget)
+	fmt.Printf("GIF:    %s\n", gifTarget)
 	fmt.Println()
 
 	// 批量转换
@@ -136,11 +149,13 @@ func main() {
 		filename := filepath.Base(inputFile)
 		ext := filepath.Ext(filename)
 		baseName := strings.TrimSuffix(filename, ext)
-		outputFile := filepath.Join(target, baseName+".gif")
 
 		fmt.Printf("[%d/%d] Converting: %s\n", i+1, len(validFiles), filename)
 
-		err := convertFile(inputFile, outputFile, width, height, fps, positionMode)
+		apngOutput := filepath.Join(apngTarget, baseName+".png")
+		gifOutput := filepath.Join(gifTarget, baseName+".gif")
+
+		err := convertFile(inputFile, apngOutput, gifOutput, width, height, fps)
 		if err != nil {
 			fmt.Printf("  Failed: %v\n", err)
 			failed++
@@ -158,7 +173,7 @@ func main() {
 	fmt.Printf("Time:    %.2f seconds\n", elapsed.Seconds())
 }
 
-func convertFile(inputPath, outputPath string, width, height, fps int, positionMode converter.PositionMode) error {
+func convertFile(inputPath, apngOutput, gifOutput string, width, height, fps int) error {
 	inputFile, err := os.Open(inputPath)
 	if err != nil {
 		return fmt.Errorf("failed to open file: %w", err)
@@ -176,10 +191,9 @@ func convertFile(inputPath, outputPath string, width, height, fps int, positionM
 	}
 
 	opts := converter.Options{
-		Width:       width,
-		Height:      height,
-		FPS:         fps,
-		PositionMode: positionMode,
+		Width:  width,
+		Height: height,
+		FPS:    fps,
 	}
 
 	frames, delays, err := conv.Convert(inputFile, opts)
@@ -198,32 +212,49 @@ func convertFile(inputPath, outputPath string, width, height, fps int, positionM
 		}
 	}
 
-	encoder := gifencoder.NewEncoder(imgWidth, imgHeight, fps)
-
-	outputFile, err := os.Create(outputPath)
+	// Step 1: SVGA -> APNG
+	apngFile, err := os.Create(apngOutput)
 	if err != nil {
-		return fmt.Errorf("failed to create output: %w", err)
+		return fmt.Errorf("failed to create APNG: %w", err)
 	}
-	defer outputFile.Close()
 
+	encoder := apngencoder.NewEncoder(imgWidth, imgHeight, fps)
 	if len(frames) == 1 {
-		err = encoder.EncodeStatic(outputFile, frames[0])
+		err = encoder.EncodeStatic(apngFile, frames[0])
 	} else {
-		err = encoder.EncodeFrames(outputFile, frames, delays)
+		err = encoder.Encode(apngFile, frames, delays)
 	}
+	apngFile.Close()
 
 	if err != nil {
-		return fmt.Errorf("encoding failed: %w", err)
+		return fmt.Errorf("APNG encoding failed: %w", err)
 	}
 
-	fileInfo, _ := os.Stat(outputPath)
-	fmt.Printf("  -> %s (%.1f KB)\n", filepath.Base(outputPath), float64(fileInfo.Size())/1024)
+	apngInfo, _ := os.Stat(apngOutput)
+	fmt.Printf("  APNG: %s (%.1f KB)\n", filepath.Base(apngOutput), float64(apngInfo.Size())/1024)
+
+	// Step 2: APNG -> GIF using ffmpeg
+	ffmpegCmd := exec.Command("ffmpeg",
+		"-y",
+		"-i", apngOutput,
+		"-filter_complex", fmt.Sprintf("[0:v] fps=%d,split [a][b];[a] palettegen [p];[b][p] paletteuse", fps),
+		"-loop", "0",
+		gifOutput,
+	)
+
+	output, err := ffmpegCmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("ffmpeg failed: %w\n%s", err, string(output))
+	}
+
+	gifInfo, _ := os.Stat(gifOutput)
+	fmt.Printf("  GIF:  %s (%.1f KB)\n", filepath.Base(gifOutput), float64(gifInfo.Size())/1024)
 
 	return nil
 }
 
 func printUsage() {
-	fmt.Fprintf(os.Stderr, `svg2gif - Batch convert SVG/SVGA to GIF
+	fmt.Fprintf(os.Stderr, `svg2gif - Batch convert SVG/SVGA to GIF (via APNG)
 
 Usage: svg2gif [options] <source> <target>
 
@@ -231,21 +262,17 @@ Options:
   -w, --width <pixels>      Output width (default: auto)
   -h, --height <pixels>     Output height (default: auto)
   -f, --fps <number>        Frames per second (default: 20)
-  -p, --position-mode <mode> Position interpretation mode (default: auto)
-                            Modes: auto, canvas_size, image_size, center, absolute
   --help                    Show this help
   --version                 Show version
 
+Output:
+  target/apng/  - APNG files
+  target/gif/   - GIF files
+
 Examples:
-  svg2gif ./svga ./output
-  svg2gif -w 800 -h 800 ./svga ./output
-  svg2gif --fps 24 ./svga ./output
-  svg2gif -p image_size ./svga ./output
+  svg2gif ./source ./target
+  svg2gif -w 800 -h 800 ./source ./target
+  svg2gif --fps 24 ./source ./target
 
 `)
-}
-
-// 保留单文件转换支持
-func init() {
-	// 如果想支持单文件模式，可以在这里检测参数
 }

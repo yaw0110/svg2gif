@@ -7,10 +7,13 @@ import (
 	"fmt"
 	"image"
 	"image/color"
+	"image/draw"
 	"image/png"
 	"io"
 	"math"
 	"sort"
+
+	xdraw "golang.org/x/image/draw"
 )
 
 // SVGAConverter handles SVGA to GIF conversion
@@ -38,40 +41,23 @@ func (c *SVGAConverter) Convert(r io.Reader, opts Options) ([]image.Image, []int
 		return nil, nil, fmt.Errorf("failed to parse SVGA: %w", err)
 	}
 
-	// Calculate actual frame count from sprite frame indices
-	// The movie.Frames field may not be accurate
-	actualFrames := 0
+	// Calculate actual frame count from sprite frames array length
+	// Each sprite has a frames array where array index = frame number
+	// Empty frames (nil) = hidden sprite at that frame
+	frameCount := int(movie.Frames)
+	if frameCount <= 0 {
+		frameCount = 1
+	}
+	// Check if any sprite has more frames than movie declares
 	for _, sprite := range movie.Sprites {
-		for _, f := range sprite.Frames {
-			frameIdx := int(f.FrameIndex)
-			// Convert negative indices (in two's complement representation for large numbers)
-			if frameIdx < 0 {
-				frameIdx = -frameIdx
-			}
-			if frameIdx+1 > actualFrames {
-				actualFrames = frameIdx + 1
-			}
-		}
-	}
-
-	// If sprites have more frames than movie declares, use that
-	if actualFrames > int(movie.Frames) {
-		movie.Frames = int32(actualFrames)
-	}
-
-	// If still no frames, default to number of images or 1
-	if movie.Frames <= 0 {
-		if len(movie.Images) > 0 {
-			movie.Frames = int32(len(movie.Images))
-		} else {
-			movie.Frames = 1
+		if len(sprite.Frames) > frameCount {
+			frameCount = len(sprite.Frames)
 		}
 	}
 
 	width := int(movie.Width)
 	height := int(movie.Height)
 
-	// Calculate scale factors for optional output dimensions
 	scaleX := 1.0
 	scaleY := 1.0
 	if opts.Width > 0 && opts.Height > 0 {
@@ -91,7 +77,6 @@ func (c *SVGAConverter) Convert(r io.Reader, opts Options) ([]image.Image, []int
 
 	// Decode images
 	images := make(map[string]image.Image)
-	imageSizes := make(map[string][2]int) // Store image dimensions for position mode detection
 	for key, imgData := range movie.Images {
 		img, err := c.decodeImage(imgData)
 		if err != nil {
@@ -99,44 +84,31 @@ func (c *SVGAConverter) Convert(r io.Reader, opts Options) ([]image.Image, []int
 			continue
 		}
 		images[key] = img
-		bounds := img.Bounds()
-		imageSizes[key] = [2]int{bounds.Dx(), bounds.Dy()}
-	}
-
-	// Detect position mode if auto
-	if opts.PositionMode == PositionModeAuto || opts.PositionMode == "" {
-		movie.PositionMode = c.detectPositionMode(movie, imageSizes)
-	} else {
-		movie.PositionMode = opts.PositionMode
 	}
 
 	// If no sprites but has images, use images directly as frames
 	if len(movie.Sprites) == 0 && len(movie.Images) > 0 {
-		// Sort image keys
 		keys := make([]string, 0, len(movie.Images))
 		for k := range movie.Images {
 			keys = append(keys, k)
 		}
 		sort.Strings(keys)
 
-		frameCount := len(keys)
-		if frameCount > actualFrames {
-			frameCount = actualFrames
+		count := len(keys)
+		if count > frameCount {
+			count = frameCount
 		}
 
-		frames := make([]image.Image, frameCount)
-		delays := make([]int, frameCount)
+		frames := make([]image.Image, count)
+		delays := make([]int, count)
 
-		for i := 0; i < frameCount; i++ {
+		for i := 0; i < count; i++ {
 			frame := image.NewRGBA(image.Rect(0, 0, width, height))
-			// Fill with transparent
 			for y := 0; y < height; y++ {
 				for x := 0; x < width; x++ {
 					frame.Set(x, y, color.RGBA{0, 0, 0, 0})
 				}
 			}
-
-			// Draw image centered
 			if i < len(keys) && images[keys[i]] != nil {
 				c.drawImageCentered(frame, images[keys[i]], width, height)
 			}
@@ -146,71 +118,17 @@ func (c *SVGAConverter) Convert(r io.Reader, opts Options) ([]image.Image, []int
 		return frames, delays, nil
 	}
 
-	frames := make([]image.Image, actualFrames)
-	delays := make([]int, actualFrames)
+	frames := make([]image.Image, frameCount)
+	delays := make([]int, frameCount)
 
 	// Render each frame
-	for i := 0; i < actualFrames; i++ {
+	for i := 0; i < frameCount; i++ {
 		frame := c.renderFrame(movie, images, i, width, height, scaleX, scaleY)
 		frames[i] = frame
 		delays[i] = 100 / fps
 	}
 
 	return frames, delays, nil
-}
-
-// detectPositionMode analyzes SVGA data to determine how positions should be interpreted
-func (c *SVGAConverter) detectPositionMode(movie *Movie, imageSizes map[string][2]int) PositionMode {
-	canvasW, canvasH := float64(movie.Width), float64(movie.Height)
-
-	// Find most common image size
-	imageSizeCount := make(map[[2]int]int)
-	for _, size := range imageSizes {
-		imageSizeCount[size]++
-	}
-
-	var commonW, commonH int
-	maxCount := 0
-	for size, count := range imageSizeCount {
-		if count > maxCount {
-			maxCount = count
-			commonW = size[0]
-			commonH = size[1]
-		}
-	}
-
-	// Collect all non-zero positions
-	positions := make(map[[2]float32]int)
-	for _, sprite := range movie.Sprites {
-		for _, f := range sprite.Frames {
-			if f.X != 0 || f.Y != 0 {
-				positions[[2]float32{f.X, f.Y}]++
-			}
-		}
-	}
-
-	// Check position patterns
-	for pos := range positions {
-		px, py := float64(pos[0]), float64(pos[1])
-
-		// Mode 1: position equals canvas size (center)
-		if px == canvasW && py == canvasH {
-			return PositionModeCanvasSize
-		}
-
-		// Mode 2: position equals image size (center)
-		if px == float64(commonW) && py == float64(commonH) {
-			return PositionModeImageSize
-		}
-
-		// Mode 3: position is absolute center
-		if px == canvasW/2 && py == canvasH/2 {
-			return PositionModeCenter
-		}
-	}
-
-	// Default: position is sprite center
-	return PositionModeAbsolute
 }
 
 // ProtobufReader helps read protobuf wire format
@@ -390,7 +308,6 @@ func (c *SVGAConverter) parseMapEntry(data []byte) (string, []byte) {
 func (c *SVGAConverter) parseSprite(data []byte) *Sprite {
 	sprite := &Sprite{Frames: make([]*Frame, 0)}
 	reader := &ProtobufReader{data: data}
-	frameIndex := int32(0)
 
 	for reader.remaining() > 0 {
 		tag := reader.readVarint()
@@ -402,15 +319,17 @@ func (c *SVGAConverter) parseSprite(data []byte) *Sprite {
 			if wire == 2 {
 				sprite.ImageKey = string(reader.readBytes())
 			}
-		case 2: // frames array - each entry is one frame, index is implicit
+		case 2: // frames array (repeated field)
 			if wire == 2 {
 				frameData := reader.readBytes()
-				frame := c.parseFrame(frameData)
-				if frame != nil {
-					frame.FrameIndex = frameIndex
+				// Parse frame data (empty frames = hidden, still need to track index)
+				if len(frameData) > 0 {
+					frame := c.parseFrame(frameData)
 					sprite.Frames = append(sprite.Frames, frame)
+				} else {
+					// Empty frame = hidden sprite at this index
+					sprite.Frames = append(sprite.Frames, nil)
 				}
-				frameIndex++
 			}
 		default:
 			if wire == 0 {
@@ -425,7 +344,7 @@ func (c *SVGAConverter) parseSprite(data []byte) *Sprite {
 }
 
 func (c *SVGAConverter) parseFrame(data []byte) *Frame {
-	frame := &Frame{Alpha: 1, ScaleX: 1, ScaleY: 1}
+	frame := &Frame{Alpha: 1, TransformA: 1, TransformD: 1}
 	reader := &ProtobufReader{data: data}
 
 	for reader.remaining() > 0 {
@@ -434,11 +353,16 @@ func (c *SVGAConverter) parseFrame(data []byte) *Frame {
 		wire := tag & 0x7
 
 		switch field {
-		case 1: // alpha
+		case 1: // alpha (field 1)
 			if wire == 5 {
 				frame.Alpha = reader.readFixed32()
 			}
-		case 2: // Transform (embedded message)
+		case 2: // Layout (embedded message, field 2)
+			if wire == 2 {
+				layoutData := reader.readBytes()
+				c.parseLayout(layoutData, frame)
+			}
+		case 3: // Transform (embedded message, field 3)
 			if wire == 2 {
 				transformData := reader.readBytes()
 				c.parseTransform(transformData, frame)
@@ -457,6 +381,43 @@ func (c *SVGAConverter) parseFrame(data []byte) *Frame {
 	return frame
 }
 
+func (c *SVGAConverter) parseLayout(data []byte, frame *Frame) {
+	reader := &ProtobufReader{data: data}
+
+	for reader.remaining() > 0 {
+		tag := reader.readVarint()
+		field := tag >> 3
+		wire := tag & 0x7
+
+		switch field {
+		case 1: // x
+			if wire == 5 {
+				frame.LayoutX = reader.readFixed32()
+			}
+		case 2: // y
+			if wire == 5 {
+				frame.LayoutY = reader.readFixed32()
+			}
+		case 3: // width
+			if wire == 5 {
+				frame.LayoutWidth = reader.readFixed32()
+			}
+		case 4: // height
+			if wire == 5 {
+				frame.LayoutHeight = reader.readFixed32()
+			}
+		default:
+			if wire == 0 {
+				reader.readVarint()
+			} else if wire == 2 {
+				reader.readBytes()
+			} else if wire == 5 {
+				reader.pos += 4
+			}
+		}
+	}
+}
+
 func (c *SVGAConverter) parseTransform(data []byte, frame *Frame) {
 	reader := &ProtobufReader{data: data}
 
@@ -466,25 +427,29 @@ func (c *SVGAConverter) parseTransform(data []byte, frame *Frame) {
 		wire := tag & 0x7
 
 		switch field {
-		case 3: // x
+		case 1: // a (scale X)
 			if wire == 5 {
-				frame.X = reader.readFixed32()
+				frame.TransformA = reader.readFixed32()
 			}
-		case 4: // y
+		case 2: // b (skew Y)
 			if wire == 5 {
-				frame.Y = reader.readFixed32()
+				frame.TransformB = reader.readFixed32()
 			}
-		case 5: // scaleX
+		case 3: // c (skew X)
 			if wire == 5 {
-				frame.ScaleX = reader.readFixed32()
+				frame.TransformC = reader.readFixed32()
 			}
-		case 6: // scaleY
+		case 4: // d (scale Y)
 			if wire == 5 {
-				frame.ScaleY = reader.readFixed32()
+				frame.TransformD = reader.readFixed32()
 			}
-		case 7: // rotation
+		case 5: // tx (translate X)
 			if wire == 5 {
-				frame.Rotation = reader.readFixed32()
+				frame.TransformTX = reader.readFixed32()
+			}
+		case 6: // ty (translate Y)
+			if wire == 5 {
+				frame.TransformTY = reader.readFixed32()
 			}
 		default:
 			if wire == 0 {
@@ -500,7 +465,30 @@ func (c *SVGAConverter) parseTransform(data []byte, frame *Frame) {
 
 func (c *SVGAConverter) decodeImage(data []byte) (image.Image, error) {
 	if len(data) > 8 && bytes.HasPrefix(data, []byte("\x89PNG")) {
-		return png.Decode(bytes.NewReader(data))
+		img, err := png.Decode(bytes.NewReader(data))
+		if err != nil {
+			return nil, err
+		}
+		// Convert paletted images to RGBA and fix alpha=0 pixels
+		// Palette images may have non-zero RGB for transparent pixels which causes issues during interpolation
+		rgba := image.NewRGBA(img.Bounds())
+		for y := img.Bounds().Min.Y; y < img.Bounds().Max.Y; y++ {
+			for x := img.Bounds().Min.X; x < img.Bounds().Max.X; x++ {
+				r, g, b, a := img.At(x, y).RGBA()
+				// If alpha is 0, set RGB to 0 as well (fix palette transparency issue)
+				if a == 0 {
+					rgba.SetRGBA(x, y, color.RGBA{0, 0, 0, 0})
+				} else {
+					rgba.SetRGBA(x, y, color.RGBA{
+						R: uint8(r >> 8),
+						G: uint8(g >> 8),
+						B: uint8(b >> 8),
+						A: uint8(a >> 8),
+					})
+				}
+			}
+		}
+		return rgba, nil
 	}
 	return nil, fmt.Errorf("not a PNG image")
 }
@@ -516,18 +504,17 @@ func (c *SVGAConverter) renderFrame(movie *Movie, images map[string]image.Image,
 		}
 	}
 
-	// Find sprites that should be visible at this frame
-	// A sprite is visible if its position is not at origin (0,0)
-	// Position equal to canvas dimensions means centered and visible
+	// Render all sprites at this frame
 	for _, sprite := range movie.Sprites {
-		var frame *Frame
+		// Get frame data by index
+		if frameIndex >= len(sprite.Frames) {
+			continue
+		}
+		frame := sprite.Frames[frameIndex]
 
-		// Find frame data for current index
-		for _, f := range sprite.Frames {
-			if int(f.FrameIndex) == frameIndex {
-				frame = f
-				break
-			}
+		// Skip if no frame data (empty frame = hidden)
+		if frame == nil {
+			continue
 		}
 
 		// Get the image
@@ -536,143 +523,161 @@ func (c *SVGAConverter) renderFrame(movie *Movie, images map[string]image.Image,
 			continue
 		}
 
-		// If frame has valid position data (not at origin), draw it
-		// Position at origin (0,0) means hidden/off-screen
-		// Position equal to canvas dimensions means centered
-		if frame != nil && (frame.X != 0 || frame.Y != 0) {
-			c.drawSpriteAtPosition(img, spriteImg, frame, width, height, scaleX, scaleY, int(movie.Width), int(movie.Height), movie.PositionMode)
+		// Skip if completely transparent
+		if frame.Alpha <= 0 {
+			continue
 		}
-		// Sprites with position (0,0) are hidden - don't draw them
+
+		// Draw sprite
+		c.drawSpriteWithTransform(img, spriteImg, frame, width, height, scaleX, scaleY)
 	}
 
 	return img
 }
 
-// drawSpriteAtPosition draws sprite at the position specified in frame data
-func (c *SVGAConverter) drawSpriteAtPosition(dst *image.RGBA, src image.Image, frame *Frame, width, height int, scaleX, scaleY float64, origWidth, origHeight int, mode PositionMode) {
+// drawSpriteWithTransform draws sprite using transform matrix
+// The reference implementation (Canvas 2D) does:
+// 1. Apply transform matrix to context
+// 2. Draw bitmap at (0, 0) with layout size
+func (c *SVGAConverter) drawSpriteWithTransform(dst *image.RGBA, src image.Image, frame *Frame, width, height int, scaleX, scaleY float64) {
 	srcBounds := src.Bounds()
-	srcW, srcH := srcBounds.Dx(), srcBounds.Dy()
 
-	// Apply scaling to source dimensions
-	scaledW := int(float64(srcW) * scaleX)
-	scaledH := int(float64(srcH) * scaleY)
+	// Layout gives us the size to draw the bitmap
+	layoutW := float64(frame.LayoutWidth)
+	layoutH := float64(frame.LayoutHeight)
 
-	// Skip hidden sprites
-	if frame.X == 0 && frame.Y == 0 {
+	// Skip sprites with empty layout (hidden)
+	if layoutW <= 0 || layoutH <= 0 {
 		return
 	}
 
-	// Calculate position based on mode
-	var centerX, centerY float64
+	// Get transform matrix components
+	mA := float64(frame.TransformA)
+	mB := float64(frame.TransformB)
+	mC := float64(frame.TransformC)
+	mD := float64(frame.TransformD)
+	mTX := float64(frame.TransformTX)
+	mTY := float64(frame.TransformTY)
 
-	switch mode {
-	case PositionModeCanvasSize:
-		// Position equals canvas size means centered
-		centerX = float64(width) / 2
-		centerY = float64(height) / 2
-	case PositionModeImageSize:
-		// Position equals image size means centered
-		centerX = float64(width) / 2
-		centerY = float64(height) / 2
-	case PositionModeCenter:
-		// Position is already the center
-		centerX = float64(frame.X) * scaleX
-		centerY = float64(frame.Y) * scaleY
-	default:
-		// PositionModeAbsolute: position is sprite center
-		centerX = float64(frame.X) * scaleX
-		centerY = float64(frame.Y) * scaleY
+	// Apply canvas scaling
+	mA *= scaleX
+	mD *= scaleY
+	mTX *= scaleX
+	mTY *= scaleY
+
+	// Skip if no transform needed (identity with scale)
+	if mA == 1 && mD == 1 && mB == 0 && mC == 0 && mTX == 0 && mTY == 0 {
+		// Simple case: just draw at origin
+		draw.Draw(dst, image.Rect(0, 0, int(layoutW), int(layoutH)), src, srcBounds.Min, draw.Over)
+		return
 	}
 
-	// Calculate top-left corner position
-	startX := int(centerX - float64(scaledW)/2)
-	startY := int(centerY - float64(scaledH)/2)
+	// Scale the source image to layout size first
+	scaledToLayout := image.NewRGBA(image.Rect(0, 0, int(layoutW), int(layoutH)))
+	xdraw.CatmullRom.Scale(scaledToLayout, scaledToLayout.Bounds(), src, srcBounds, xdraw.Over, nil)
 
-	// Apply alpha if needed
+	// Now apply the transform to create the final image
+	// Calculate output bounds
+	corners := [4]struct{ x, y float64 }{
+		{mTX, mTY},                                                              // (0, 0)
+		{mA*layoutW + mTX, mB*layoutW + mTY},                                    // (layoutW, 0)
+		{mC*layoutH + mTX, mD*layoutH + mTY},                                    // (0, layoutH)
+		{mA*layoutW + mC*layoutH + mTX, mB*layoutW + mD*layoutH + mTY},          // (layoutW, layoutH)
+	}
+
+	minX := corners[0].x
+	maxX := corners[0].x
+	minY := corners[0].y
+	maxY := corners[0].y
+	for _, c := range corners[1:] {
+		if c.x < minX { minX = c.x }
+		if c.x > maxX { maxX = c.x }
+		if c.y < minY { minY = c.y }
+		if c.y > maxY { maxY = c.y }
+	}
+
+	// Clamp to canvas
+	dstStartX := int(math.Floor(minX))
+	dstStartY := int(math.Floor(minY))
+	dstEndX := int(math.Ceil(maxX))
+	dstEndY := int(math.Ceil(maxY))
+	if dstStartX < 0 { dstStartX = 0 }
+	if dstStartY < 0 { dstStartY = 0 }
+	if dstEndX > width { dstEndX = width }
+	if dstEndY > height { dstEndY = height }
+
+	// Apply alpha
 	alpha := float64(frame.Alpha)
-	if alpha <= 0 {
-		alpha = 1
-	}
+	if alpha <= 0 { alpha = 1 }
 
-	// Draw scaled sprite using bilinear interpolation for better quality
-	for y := 0; y < scaledH; y++ {
-		for x := 0; x < scaledW; x++ {
-			// Bilinear interpolation coordinates
-			srcXF := float64(x) / scaleX
-			srcYF := float64(y) / scaleY
+	// Calculate inverse transform
+	det := mA*mD - mB*mC
+	if det == 0 { return }
+	invA := mD / det
+	invB := -mB / det
+	invC := -mC / det
+	invD := mA / det
 
-			// Get integer and fractional parts
-			srcX0 := int(srcXF)
-			srcY0 := int(srcYF)
-			srcX1 := srcX0 + 1
-			srcY1 := srcY0 + 1
+	// Draw transformed pixels
+	for dstY := dstStartY; dstY < dstEndY; dstY++ {
+		for dstX := dstStartX; dstX < dstEndX; dstX++ {
+			// Inverse transform
+			dx := float64(dstX) - mTX
+			dy := float64(dstY) - mTY
+			layoutXF := invA*dx + invC*dy
+			layoutYF := invB*dx + invD*dy
 
-			// Clamp to source bounds
-			if srcX0 >= srcW {
-				srcX0 = srcW - 1
-			}
-			if srcY0 >= srcH {
-				srcY0 = srcH - 1
-			}
-			if srcX1 >= srcW {
-				srcX1 = srcW - 1
-			}
-			if srcY1 >= srcH {
-				srcY1 = srcH - 1
+			// Check bounds
+			if layoutXF < 0 || layoutXF >= layoutW || layoutYF < 0 || layoutYF >= layoutH {
+				continue
 			}
 
-			// Fractional parts for interpolation
-			fx := srcXF - float64(srcX0)
-			fy := srcYF - float64(srcY0)
+			// Sample from scaled image (nearest neighbor for simplicity)
+			ix := int(layoutXF)
+			iy := int(layoutYF)
+			if ix >= int(layoutW) { ix = int(layoutW) - 1 }
+			if iy >= int(layoutH) { iy = int(layoutH) - 1 }
 
-			// Get four neighboring pixels
-			c00 := src.At(srcX0+srcBounds.Min.X, srcY0+srcBounds.Min.Y)
-			c10 := src.At(srcX1+srcBounds.Min.X, srcY0+srcBounds.Min.Y)
-			c01 := src.At(srcX0+srcBounds.Min.X, srcY1+srcBounds.Min.Y)
-			c11 := src.At(srcX1+srcBounds.Min.X, srcY1+srcBounds.Min.Y)
+			r, g, b, a := scaledToLayout.At(ix, iy).RGBA()
+			if a == 0 { continue }
 
-			// Interpolate
-			r00, g00, b00, a00 := c00.RGBA()
-			r10, g10, b10, a10 := c10.RGBA()
-			r01, g01, b01, a01 := c01.RGBA()
-			r11, g11, b11, a11 := c11.RGBA()
-
-			// Bilinear interpolation
-			r := bilinear(r00, r10, r01, r11, fx, fy)
-			g := bilinear(g00, g10, g01, g11, fx, fy)
-			b := bilinear(b00, b10, b01, b11, fx, fy)
-			a := bilinear(a00, a10, a01, a11, fx, fy)
-
-			// Apply alpha
+			// Apply frame alpha
 			if alpha < 1 {
 				a = uint32(float64(a) * alpha)
 			}
 
-			dstX := startX + x
-			dstY := startY + y
-
-			// Allow drawing outside canvas bounds - just clip
-			if dstX < 0 || dstX >= width || dstY < 0 || dstY >= height {
-				continue
-			}
-
-			if a > 0 {
+			// Alpha blend with destination
+			dstR, dstG, dstB, dstA := dst.At(dstX, dstY).RGBA()
+			srcANorm := float64(a) / 65535.0
+			dstANorm := float64(dstA) / 65535.0
+			outA := srcANorm + dstANorm*(1-srcANorm)
+			if outA > 0 {
+				outR := (float64(r)/65535.0*srcANorm + float64(dstR)/65535.0*dstANorm*(1-srcANorm)) / outA
+				outG := (float64(g)/65535.0*srcANorm + float64(dstG)/65535.0*dstANorm*(1-srcANorm)) / outA
+				outB := (float64(b)/65535.0*srcANorm + float64(dstB)/65535.0*dstANorm*(1-srcANorm)) / outA
 				dst.Set(dstX, dstY, color.RGBA{
-					R: uint8(r >> 8),
-					G: uint8(g >> 8),
-					B: uint8(b >> 8),
-					A: uint8(a >> 8),
+					R: uint8(outR * 255),
+					G: uint8(outG * 255),
+					B: uint8(outB * 255),
+					A: uint8(outA * 255),
 				})
 			}
 		}
 	}
 }
 
-// bilinear performs bilinear interpolation between four values
+// bilinearF performs bilinear interpolation on float64 values
+func bilinearF(v00, v10, v01, v11, fx, fy float64) float64 {
+	v0 := v00*(1-fx) + v10*fx
+	v1 := v01*(1-fx) + v11*fx
+	return v0*(1-fy) + v1*fy
+}
+
+// bilinear performs bilinear interpolation between four uint32 values
 func bilinear(v00, v10, v01, v11 uint32, fx, fy float64) uint32 {
-	v0 := uint32(float64(v00) * (1-fx) + float64(v10) * fx)
-	v1 := uint32(float64(v01) * (1-fx) + float64(v11) * fx)
-	return uint32(float64(v0) * (1-fy) + float64(v1) * fy)
+	v0 := uint32(float64(v00)*(1-fx) + float64(v10)*fx)
+	v1 := uint32(float64(v01)*(1-fx) + float64(v11)*fx)
+	return uint32(float64(v0)*(1-fy) + float64(v1)*fy)
 }
 
 // drawImageCentered draws an image centered on the canvas
@@ -698,14 +703,13 @@ func (c *SVGAConverter) drawImageCentered(dst *image.RGBA, src image.Image, widt
 
 // Movie represents SVGA movie data
 type Movie struct {
-	Version      string
-	Fps          int32
-	Frames       int32
-	Width        int32
-	Height       int32
-	Images       map[string][]byte
-	Sprites      []*Sprite
-	PositionMode PositionMode // Detected or configured position mode
+	Version string
+	Fps     int32
+	Frames  int32
+	Width   int32
+	Height  int32
+	Images  map[string][]byte
+	Sprites []*Sprite
 }
 
 // Sprite represents a sprite element
@@ -718,9 +722,16 @@ type Sprite struct {
 type Frame struct {
 	FrameIndex int32
 	Alpha      float32
-	ScaleX     float32
-	ScaleY     float32
-	Rotation   float32
-	X          float32
-	Y          float32
+	// Layout contains position and size
+	LayoutX      float32
+	LayoutY      float32
+	LayoutWidth  float32
+	LayoutHeight float32
+	// Transform is 2D affine matrix [a, b, c, d, tx, ty]
+	TransformA  float32 // scale X
+	TransformB  float32 // skew Y
+	TransformC  float32 // skew X
+	TransformD  float32 // scale Y
+	TransformTX float32 // translate X
+	TransformTY float32 // translate Y
 }

@@ -14,28 +14,11 @@ const (
 	FormatSVGA Format = "svga"
 )
 
-// PositionMode defines how to interpret sprite positions
-type PositionMode string
-
-const (
-	// PositionModeAuto - automatically detect from SVGA data
-	PositionModeAuto PositionMode = "auto"
-	// PositionModeCanvasSize - position equals canvas size means center
-	PositionModeCanvasSize PositionMode = "canvas_size"
-	// PositionModeImageSize - position equals image size means center
-	PositionModeImageSize PositionMode = "image_size"
-	// PositionModeCenter - position is absolute center coordinates
-	PositionModeCenter PositionMode = "center"
-	// PositionModeAbsolute - position is sprite center (no centering)
-	PositionModeAbsolute PositionMode = "absolute"
-)
-
 // Options contains conversion parameters
 type Options struct {
-	Width       int
-	Height      int
-	FPS         int
-	PositionMode PositionMode // How to interpret sprite positions
+	Width  int
+	Height int
+	FPS    int
 }
 
 // Converter defines the interface for format converters
