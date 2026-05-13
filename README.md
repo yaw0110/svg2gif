@@ -5,9 +5,8 @@ SVG/SVGA 批量转换为 GIF 工具
 ## 功能特性
 
 - 支持 SVG 和 SVGA 格式转换为 GIF
-- 采用两步转换策略：SVGA → APNG → GIF，确保高质量输出
+- 纯 Go 实现，无需外部依赖
 - 批量转换，自动匹配文件名
-- 同时输出 APNG 和 GIF 文件，便于调试和对比
 - 高质量渲染，使用 CatmullRom 插值算法
 - 正确处理调色板 PNG 透明度问题
 - 支持自定义尺寸和帧率
@@ -20,7 +19,7 @@ SVG/SVGA 批量转换为 GIF 工具
 1. 解压 `svg2gif-win.zip`
 2. 将 SVG/SVGA 文件放入 `source` 目录
 3. 双击 `svg2gif.bat` 运行
-4. GIF 文件输出到 `target/gif` 目录，APNG 输出到 `target/apng` 目录
+4. GIF 文件输出到 `target` 目录
 
 ### macOS / Linux
 
@@ -45,10 +44,6 @@ Options:
   -f, --fps <number>        帧率 FPS (默认: 20)
   --help                    显示帮助
   --version                 显示版本
-
-Output:
-  target/apng/  - APNG 文件 (调试用)
-  target/gif/   - GIF 文件 (最终输出)
 ```
 
 ## 使用示例
@@ -72,17 +67,13 @@ svg2gif/
 │   └── svg2gif/
 │       └── main.go          # 程序入口
 ├── pkg/
-│   ├── converter/
-│   │   ├── converter.go     # 转换器接口
-│   │   ├── svg.go           # SVG 转换实现
-│   │   └── svga.go          # SVGA 转换实现
-│   └── apng/
-│       └── encoder.go       # APNG 编码器
+│   └── converter/
+│       ├── converter.go     # 转换器接口
+│       ├── svg.go           # SVG 转换实现
+│       └── svga.go          # SVGA 转换实现
 ├── dist/                    # 编译输出目录
 ├── source/                  # 源文件目录
 ├── target/                  # 输出目录
-│   ├── apng/                # APNG 文件
-│   └── gif/                 # GIF 文件
 ├── go.mod
 ├── go.sum
 └── README.md
@@ -92,12 +83,9 @@ svg2gif/
 
 ```
 source/                  target/
-├── img1.svga   →        ├── apng/img1.png
-├── img2.svga   →        │   ├── apng/img2.png
-└── img3.svg    →        │   ├── apng/img3.png
-                         └── gif/img1.gif
-                             ├── gif/img2.gif
-                             └── gif/img3.gif
+├── img1.svga   →        ├── img1.gif
+├── img2.svga   →        ├── img2.gif
+└── img3.svg    →        └── img3.gif
 ```
 
 ## 技术实现
@@ -115,19 +103,17 @@ source/                  target/
 - Porter-Duff source-over alpha 混合
 - 预乘 alpha 双线性插值（Canvas 2D 标准方式）
 
-### APNG → GIF
+### GIF 编码
 
-- 使用 ffmpeg 进行 APNG 到 GIF 转换
-- palettegen + paletteuse 滤镜优化颜色质量
+- 使用 Go 标准库 image/gif
+- Plan9 调色板（256色）
+- 支持动画和透明度
 
 ## 依赖
 
 - Go 1.21+
-- ffmpeg (用于 APNG → GIF 转换)
 - github.com/srwiley/oksvg
 - github.com/srwiley/rasterx
-- github.com/kettek/apng
-- golang.org/x/image/draw
 
 ## 编译
 
@@ -150,13 +136,17 @@ cd dist && zip svg2gif-windows-amd64.zip svg2gif-windows-amd64.exe
 
 ## 版本历史
 
+### v1.5.0
+- 移除 ffmpeg 依赖，使用纯 Go 实现 GIF 编码
+- 使用 Plan9 调色板优化颜色质量
+- 简化输出目录结构
+
 ### v1.4.0
 - 采用 SVGA → APNG → GIF 两步转换策略
 - 同时输出 APNG 和 GIF 文件便于调试
 - 修复帧数计算，正确处理稀疏帧数据
 - 修复调色板 PNG 透明度问题
 - 使用 CatmullRom 高质量插值算法
-- 正确实现 Porter-Duff alpha 混合
 
 ### v1.3.0
 - 新增智能位置检测，自动识别 SVGA 精灵位置模式

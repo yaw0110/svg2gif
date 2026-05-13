@@ -2,18 +2,19 @@ package main
 
 import (
 	"fmt"
+	"image"
+	"image/color/palette"
+	"image/gif"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/jhyan/svg2gif/pkg/converter"
-	apngencoder "github.com/jhyan/svg2gif/pkg/apng"
 )
 
 var (
-	version = "1.4.0"
+	version = "1.5.0"
 )
 
 func main() {
@@ -77,12 +78,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	// 检查 ffmpeg
-	if _, err := exec.LookPath("ffmpeg"); err != nil {
-		fmt.Fprintln(os.Stderr, "Error: ffmpeg is required. Please install ffmpeg first.")
-		os.Exit(1)
-	}
-
 	// 检查 source
 	info, err := os.Stat(source)
 	if err != nil {
@@ -97,20 +92,6 @@ func main() {
 	// 创建 target 目录
 	if err := os.MkdirAll(target, 0755); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: failed to create target directory: %v\n", err)
-		os.Exit(1)
-	}
-
-	// 创建 APNG 输出目录
-	apngTarget := filepath.Join(target, "apng")
-	if err := os.MkdirAll(apngTarget, 0755); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: failed to create APNG directory: %v\n", err)
-		os.Exit(1)
-	}
-
-	// 创建 GIF 输出目录
-	gifTarget := filepath.Join(target, "gif")
-	if err := os.MkdirAll(gifTarget, 0755); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: failed to create GIF directory: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -137,8 +118,7 @@ func main() {
 
 	fmt.Printf("Found %d file(s) to convert\n", len(validFiles))
 	fmt.Printf("Source: %s\n", source)
-	fmt.Printf("APNG:   %s\n", apngTarget)
-	fmt.Printf("GIF:    %s\n", gifTarget)
+	fmt.Printf("Target: %s\n", target)
 	fmt.Println()
 
 	// 批量转换
@@ -152,10 +132,9 @@ func main() {
 
 		fmt.Printf("[%d/%d] Converting: %s\n", i+1, len(validFiles), filename)
 
-		apngOutput := filepath.Join(apngTarget, baseName+".png")
-		gifOutput := filepath.Join(gifTarget, baseName+".gif")
+		gifOutput := filepath.Join(target, baseName+".gif")
 
-		err := convertFile(inputFile, apngOutput, gifOutput, width, height, fps)
+		err := convertFile(inputFile, gifOutput, width, height, fps)
 		if err != nil {
 			fmt.Printf("  Failed: %v\n", err)
 			failed++
@@ -173,7 +152,7 @@ func main() {
 	fmt.Printf("Time:    %.2f seconds\n", elapsed.Seconds())
 }
 
-func convertFile(inputPath, apngOutput, gifOutput string, width, height, fps int) error {
+func convertFile(inputPath, gifOutput string, width, height, fps int) error {
 	inputFile, err := os.Open(inputPath)
 	if err != nil {
 		return fmt.Errorf("failed to open file: %w", err)
@@ -201,50 +180,20 @@ func convertFile(inputPath, apngOutput, gifOutput string, width, height, fps int
 		return fmt.Errorf("conversion failed: %w", err)
 	}
 
-	imgWidth, imgHeight := width, height
-	if imgWidth <= 0 || imgHeight <= 0 {
-		if len(frames) > 0 {
-			bounds := frames[0].Bounds()
-			imgWidth = bounds.Dx()
-			imgHeight = bounds.Dy()
-		} else {
-			imgWidth, imgHeight = 800, 600
-		}
+	if len(frames) == 0 {
+		return fmt.Errorf("no frames generated")
 	}
 
-	// Step 1: SVGA -> APNG
-	apngFile, err := os.Create(apngOutput)
+	// 直接生成 GIF
+	gifFile, err := os.Create(gifOutput)
 	if err != nil {
-		return fmt.Errorf("failed to create APNG: %w", err)
+		return fmt.Errorf("failed to create GIF: %w", err)
 	}
+	defer gifFile.Close()
 
-	encoder := apngencoder.NewEncoder(imgWidth, imgHeight, fps)
-	if len(frames) == 1 {
-		err = encoder.EncodeStatic(apngFile, frames[0])
-	} else {
-		err = encoder.Encode(apngFile, frames, delays)
-	}
-	apngFile.Close()
-
+	err = encodeGIF(gifFile, frames, delays)
 	if err != nil {
-		return fmt.Errorf("APNG encoding failed: %w", err)
-	}
-
-	apngInfo, _ := os.Stat(apngOutput)
-	fmt.Printf("  APNG: %s (%.1f KB)\n", filepath.Base(apngOutput), float64(apngInfo.Size())/1024)
-
-	// Step 2: APNG -> GIF using ffmpeg
-	ffmpegCmd := exec.Command("ffmpeg",
-		"-y",
-		"-i", apngOutput,
-		"-filter_complex", fmt.Sprintf("[0:v] fps=%d,split [a][b];[a] palettegen [p];[b][p] paletteuse", fps),
-		"-loop", "0",
-		gifOutput,
-	)
-
-	output, err := ffmpegCmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("ffmpeg failed: %w\n%s", err, string(output))
+		return fmt.Errorf("GIF encoding failed: %w", err)
 	}
 
 	gifInfo, _ := os.Stat(gifOutput)
@@ -253,8 +202,42 @@ func convertFile(inputPath, apngOutput, gifOutput string, width, height, fps int
 	return nil
 }
 
+// encodeGIF 编码帧为 GIF
+func encodeGIF(w *os.File, frames []image.Image, delays []int) error {
+	if len(frames) == 0 {
+		return nil
+	}
+
+	// 使用 Plan9 调色板
+	pal := palette.Plan9
+
+	g := &gif.GIF{
+		Image: make([]*image.Paletted, len(frames)),
+		Delay: make([]int, len(frames)),
+	}
+
+	for i, frame := range frames {
+		// 转换为调色板图像
+		bounds := frame.Bounds()
+		paletted := image.NewPaletted(bounds, pal)
+
+		for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+			for x := bounds.Min.X; x < bounds.Max.X; x++ {
+				paletted.Set(x, y, frame.At(x, y))
+			}
+		}
+
+		g.Image[i] = paletted
+		// GIF delay 单位是 10ms，delays 是 100ms 为单位的帧间隔
+		// delays[i] = 100/fps，所以 delay = delays[i] * 10
+		g.Delay[i] = delays[i] * 10
+	}
+
+	return gif.EncodeAll(w, g)
+}
+
 func printUsage() {
-	fmt.Fprintf(os.Stderr, `svg2gif - Batch convert SVG/SVGA to GIF (via APNG)
+	fmt.Fprintf(os.Stderr, `svg2gif - Batch convert SVG/SVGA to GIF
 
 Usage: svg2gif [options] <source> <target>
 
@@ -264,10 +247,6 @@ Options:
   -f, --fps <number>        Frames per second (default: 20)
   --help                    Show this help
   --version                 Show version
-
-Output:
-  target/apng/  - APNG files
-  target/gif/   - GIF files
 
 Examples:
   svg2gif ./source ./target
